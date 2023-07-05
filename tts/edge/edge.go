@@ -3,14 +3,15 @@ package edge
 import (
 	"context"
 	"fmt"
-	"github.com/gorilla/websocket"
-	tsg "github.com/jing332/tts-server-go"
-	log "github.com/sirupsen/logrus"
 	"math/rand"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
+	tsg "github.com/jing332/tts-server-go"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -103,6 +104,70 @@ func (t *TTS) CloseConn() {
 	}
 }
 
+type AudiaMetaData struct {
+	AudioMeta string
+	AudioData string
+}
+
+func (t *TTS) GetAudioWithWordBoundary(ssml, format string) (data AudiaMetaData, audioData []byte, err error) {
+	t.uuid = tsg.GetUUID()
+	if t.conn == nil {
+		err := t.NewConn()
+		if err != nil {
+			return data, nil, err
+		}
+	}
+
+	running := true
+	defer func() { running = false }()
+	var finished = make(chan bool)
+	var failed = make(chan error)
+	metaData := "["
+	t.onReadMessage = func(messageType int, p []byte, errMessage error) bool {
+		if messageType == -1 && p == nil && errMessage != nil { //已经断开链接
+			if running {
+				failed <- errMessage
+			}
+			return true
+		}
+
+		metaIndex := strings.Index(string(p), "Path:audio.meta")
+
+		if messageType == websocket.BinaryMessage {
+			index := strings.Index(string(p), "Path:audio")
+			data := []byte(string(p)[index+12:])
+			audioData = append(audioData, data...)
+		} else if messageType == websocket.TextMessage && metaIndex != -1 {
+			metaData += string(p)[metaIndex+19:] + ","
+		} else if messageType == websocket.TextMessage && string(p)[len(string(p))-14:len(string(p))-6] == "turn.end" {
+			metaData = metaData[:len(metaData)-1]
+			metaData += "]"
+			metaData = strings.ReplaceAll(metaData, "\r", "")
+			metaData = strings.ReplaceAll(metaData, "\n", "")
+			data.AudioMeta = metaData
+			// data.AudioData = string(audioData)
+			finished <- true
+			return false
+		}
+		return false
+	}
+	err = t.sendConfigMessage(format)
+	if err != nil {
+		return data, nil, err
+	}
+	err = t.sendSsmlMessage(ssml)
+	if err != nil {
+		return data, nil, err
+	}
+
+	select {
+	case <-finished:
+		return data, audioData, err
+	case errMessage := <-failed:
+		return data, nil, errMessage
+	}
+}
+
 func (t *TTS) GetAudio(ssml, format string) (audioData []byte, err error) {
 	t.uuid = tsg.GetUUID()
 	if t.conn == nil {
@@ -153,7 +218,7 @@ func (t *TTS) GetAudio(ssml, format string) (audioData []byte, err error) {
 
 func (t *TTS) sendConfigMessage(format string) error {
 	cfgMsg := "X-Timestamp:" + tsg.GetISOTime() + "\r\nContent-Type:application/json; charset=utf-8\r\n" + "Path:speech.config\r\n\r\n" +
-		`{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"` + format + `"}}}}`
+		`{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"` + format + `"}}}}`
 	_ = t.conn.SetWriteDeadline(time.Now().Add(t.WriteTimeout))
 	err := t.conn.WriteMessage(websocket.TextMessage, []byte(cfgMsg))
 	if err != nil {

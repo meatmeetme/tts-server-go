@@ -7,13 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	tts_server_go "github.com/jing332/tts-server-go"
 	"io"
 	"io/fs"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
+
+	tts_server_go "github.com/jing332/tts-server-go"
 
 	"github.com/gorilla/websocket"
 	"github.com/jing332/tts-server-go/tts/azure"
@@ -52,6 +53,7 @@ func (s *GracefulServer) HandleFunc() {
 	s.serveMux.Handle("/api/azure/voices", http.TimeoutHandler(http.HandlerFunc(s.azureVoicesAPIHandler), 30*time.Second, "timeout"))
 
 	s.serveMux.Handle("/api/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandler), 30*time.Second, "timeout"))
+	s.serveMux.Handle("/api/v2/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandler2), 30*time.Second, "timeout"))
 
 	s.serveMux.Handle("/api/creation", http.TimeoutHandler(http.HandlerFunc(s.creationAPIHandler), 30*time.Second, "timeout"))
 	s.serveMux.Handle("/api/creation/voices", http.TimeoutHandler(http.HandlerFunc(s.creationVoicesAPIHandler), 30*time.Second, "timeout"))
@@ -174,6 +176,72 @@ func (s *GracefulServer) edgeAPIHandler(w http.ResponseWriter, r *http.Request) 
 	case data := <-succeed: /* 成功接收到音频 */
 		log.Infof("音频下载完成, 大小：%dKB", len(data)/1024)
 		err := writeAudioData(w, data, format)
+		if err != nil {
+			log.Warnln(err)
+		}
+	case reason := <-failed: /* 失败 */
+		ttsEdge.CloseConn()
+		ttsEdge = nil
+		writeErrorData(w, http.StatusInternalServerError, "获取音频失败(Edge): "+reason.Error())
+	case <-r.Context().Done(): /* 与阅读APP断开连接 超时15s */
+		log.Warnln("客户端(阅读APP)连接 超时关闭/意外断开")
+		select { /* 3s内如果成功下载, 就保留与微软服务器的连接 */
+		case <-succeed:
+			log.Debugln("断开后3s内成功下载")
+		case <-time.After(time.Second * 3): /* 抛弃WebSocket连接 */
+			ttsEdge.CloseConn()
+			ttsEdge = nil
+		}
+	}
+	log.Infof("耗时：%dms\n", time.Since(startTime).Milliseconds())
+}
+
+// Microsoft Edge 大声朗读接口
+func (s *GracefulServer) edgeAPIHandler2(w http.ResponseWriter, r *http.Request) {
+	s.edgeLock.Lock()
+	defer s.edgeLock.Unlock()
+	defer r.Body.Close()
+	pass := s.verifyToken(w, r)
+	if !pass {
+		return
+	}
+
+	startTime := time.Now()
+	body, _ := io.ReadAll(r.Body)
+	ssml := string(body)
+	format := r.Header.Get("Format")
+
+	log.Infoln("接收到SSML(Edge):", ssml)
+	if ttsEdge == nil {
+		ttsEdge = &edge.TTS{DnsLookupEnabled: s.UseDnsEdge}
+	}
+
+	var succeed2 = make(chan edge.AudiaMetaData)
+	var succeed = make(chan []byte)
+	var failed = make(chan error)
+	go func() {
+		for i := 0; i < 3; i++ { /* 循环3次, 成功则return */
+			audio_meta_data, data, err := ttsEdge.GetAudioWithWordBoundary(ssml, format)
+			if err != nil {
+				if websocket.IsCloseError(err, websocket.CloseAbnormalClosure) { /* 1006异常断开 */
+					log.Infoln("异常断开, 自动重连...")
+					time.Sleep(1000) /* 等待一秒 */
+				} else { /* 正常性错误，如SSML格式错误 */
+					failed <- err
+					return
+				}
+			} else { /* 成功 */
+				succeed2 <- audio_meta_data
+				succeed <- data
+				return
+			}
+		}
+	}()
+
+	select { /* 阻塞 等待结果 */
+	case data := <-succeed: /* 成功接收到音频 */
+		log.Infof("音频下载完成, 大小：%dKB", len(data)/1024)
+		err := returnJsonData(w, data)
 		if err != nil {
 			log.Warnln(err)
 		}
@@ -350,6 +418,12 @@ func (s *GracefulServer) creationAPIHandler(w http.ResponseWriter, r *http.Reque
 	}
 
 	log.Infof("耗时: %dms\n", time.Since(startTime).Milliseconds())
+}
+
+func returnJsonData(w http.ResponseWriter, data interface{}) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	return json.NewEncoder(w).Encode(data)
 }
 
 /* 写入音频数据到客户端(阅读APP) */
