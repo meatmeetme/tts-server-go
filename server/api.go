@@ -48,7 +48,7 @@ func (s *GracefulServer) HandleFunc() {
 	s.serveMux.Handle("/api/legado", http.TimeoutHandler(http.HandlerFunc(s.legadoAPIHandler), 15*time.Second, "timeout"))
 
 	s.serveMux.Handle("/api/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandler), 30*time.Second, "timeout"))
-	s.serveMux.Handle("/api/v2/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandler2), 30*time.Second, "timeout"))
+	s.serveMux.Handle("/api/v2/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandlerWithJsonReturn), 30*time.Second, "timeout"))
 }
 
 // ListenAndServe 监听服务
@@ -184,7 +184,7 @@ func (s *GracefulServer) edgeAPIHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 // Microsoft Edge 大声朗读接口
-func (s *GracefulServer) edgeAPIHandler2(w http.ResponseWriter, r *http.Request) {
+func (s *GracefulServer) edgeAPIHandlerWithJsonReturn(w http.ResponseWriter, r *http.Request) {
 	s.edgeLock.Lock()
 	defer s.edgeLock.Unlock()
 	defer r.Body.Close()
@@ -238,7 +238,13 @@ func (s *GracefulServer) edgeAPIHandler2(w http.ResponseWriter, r *http.Request)
 	case reason := <-failed: /* 失败 */
 		ttsEdge.CloseConn()
 		ttsEdge = nil
-		writeErrorData(w, http.StatusInternalServerError, "获取音频失败(Edge): "+reason.Error())
+		// writeErrorData(w, http.StatusInternalServerError, "获取音频失败(Edge): "+reason.Error())
+		resp := response{
+			Code: http.StatusOK,
+			Msg:  reason.Error(),
+		}
+		jsonData, _ := json.Marshal(resp)
+		w.Write(jsonData)
 	case <-r.Context().Done(): /* 与阅读APP断开连接 超时15s */
 		log.Warnln("客户端(阅读APP)连接 超时关闭/意外断开")
 		select { /* 3s内如果成功下载, 就保留与微软服务器的连接 */
@@ -257,6 +263,12 @@ type LastAudioCache struct {
 	audioData []byte
 }
 
+type response struct {
+	Code int         `json:"code"`
+	Msg  string      `json:"msg"`
+	Data interface{} `json:"data"`
+}
+
 func returnJsonData(w http.ResponseWriter, r *http.Request, data edge.AudiaMetaData, audio_data []byte, format string) {
 	fileBase64 := base64.StdEncoding.EncodeToString(audio_data)
 	w.Header().Set("Content-Type", "application/json")
@@ -265,7 +277,12 @@ func returnJsonData(w http.ResponseWriter, r *http.Request, data edge.AudiaMetaD
 		"format": format,
 	}
 	data.AudioData = m
-	jsonData, _ := json.Marshal(data)
+	resp := response{
+		Code: http.StatusOK,
+		Msg:  "ok",
+		Data: data,
+	}
+	jsonData, _ := json.Marshal(resp)
 	w.Write(jsonData)
 }
 
