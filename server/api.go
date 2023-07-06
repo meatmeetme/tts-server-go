@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,8 +17,6 @@ import (
 	tts_server_go "github.com/jing332/tts-server-go"
 
 	"github.com/gorilla/websocket"
-	"github.com/jing332/tts-server-go/tts/azure"
-	"github.com/jing332/tts-server-go/tts/creation"
 	"github.com/jing332/tts-server-go/tts/edge"
 	log "github.com/sirupsen/logrus"
 )
@@ -50,14 +47,8 @@ func (s *GracefulServer) HandleFunc() {
 	s.serveMux.Handle("/", http.FileServer(http.FS(webFilesFs)))
 	s.serveMux.Handle("/api/legado", http.TimeoutHandler(http.HandlerFunc(s.legadoAPIHandler), 15*time.Second, "timeout"))
 
-	s.serveMux.Handle("/api/azure", http.TimeoutHandler(http.HandlerFunc(s.azureAPIHandler), 30*time.Second, "timeout"))
-	s.serveMux.Handle("/api/azure/voices", http.TimeoutHandler(http.HandlerFunc(s.azureVoicesAPIHandler), 30*time.Second, "timeout"))
-
 	s.serveMux.Handle("/api/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandler), 30*time.Second, "timeout"))
 	s.serveMux.Handle("/api/v2/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandler2), 30*time.Second, "timeout"))
-
-	s.serveMux.Handle("/api/creation", http.TimeoutHandler(http.HandlerFunc(s.creationAPIHandler), 30*time.Second, "timeout"))
-	s.serveMux.Handle("/api/creation/voices", http.TimeoutHandler(http.HandlerFunc(s.creationVoicesAPIHandler), 30*time.Second, "timeout"))
 }
 
 // ListenAndServe 监听服务
@@ -93,11 +84,6 @@ func (s *GracefulServer) Close() {
 		ttsEdge.CloseConn()
 		ttsEdge = nil
 	}
-	if ttsAzure != nil {
-		ttsAzure.CloseConn()
-		ttsAzure = nil
-	}
-
 	_ = s.Server.Close()
 	_ = s.Shutdown(time.Second * 5)
 }
@@ -271,159 +257,6 @@ type LastAudioCache struct {
 	audioData []byte
 }
 
-var ttsAzure *azure.TTS
-var audioCache *LastAudioCache
-
-// 微软Azure TTS接口
-func (s *GracefulServer) azureAPIHandler(w http.ResponseWriter, r *http.Request) {
-	s.azureLock.Lock()
-	defer s.azureLock.Unlock()
-	defer r.Body.Close()
-	pass := s.verifyToken(w, r)
-	if !pass {
-		return
-	}
-
-	startTime := time.Now()
-	format := r.Header.Get("Format")
-	body, _ := io.ReadAll(r.Body)
-	ssml := string(body)
-	log.Infoln("接收到SSML(Azure): ", ssml)
-
-	if audioCache != nil {
-		if audioCache.ssml == ssml {
-			log.Infoln("与上次超时断开时音频SSML一致, 使用缓存...\n")
-			err := writeAudioData(w, audioCache.audioData, format)
-			if err != nil {
-				log.Warnln(err)
-			} else {
-				audioCache = nil
-			}
-			return
-		} else { /* SSML不一致, 抛弃 */
-			audioCache = nil
-		}
-	}
-
-	if ttsAzure == nil {
-		ttsAzure = &azure.TTS{}
-	}
-
-	var succeed = make(chan []byte)
-	var failed = make(chan error)
-	go func() {
-		for i := 0; i < 3; i++ { /* 循环3次, 成功则return */
-			data, err := ttsAzure.GetAudio(ssml, format)
-			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseAbnormalClosure) { /* 1006异常断开 */
-					log.Infoln("异常断开, 自动重连...")
-					time.Sleep(1000) /* 等待一秒 */
-				} else { /* 正常性错误，如SSML格式错误 */
-					failed <- err
-					return
-				}
-			} else { /* 成功 */
-				succeed <- data
-				return
-			}
-		}
-	}()
-
-	select { /* 阻塞 等待结果 */
-	case data := <-succeed: /* 成功接收到音频 */
-		log.Infof("音频下载完成, 大小：%dKB", len(data)/1024)
-		err := writeAudioData(w, data, format)
-		if err != nil {
-			log.Warnln(err)
-		}
-	case reason := <-failed: /* 失败 */
-		ttsAzure.CloseConn()
-		ttsAzure = nil
-		writeErrorData(w, http.StatusInternalServerError, "获取音频失败(Azure): "+reason.Error())
-	case <-r.Context().Done(): /* 与阅读APP断开连接  超时15s */
-		log.Warnln("客户端(阅读APP)连接 超时关闭/意外断开")
-		select { /* 15s内如果成功下载, 就保留与微软服务器的连接 */
-		case data := <-succeed:
-			log.Infoln("断开后15s内成功下载")
-			audioCache = &LastAudioCache{
-				ssml:      ssml,
-				audioData: data,
-			}
-		case <-time.After(time.Second * 15): /* 抛弃WebSocket连接 */
-			ttsAzure.CloseConn()
-			ttsAzure = nil
-		}
-	}
-	log.Infof("耗时: %dms\n", time.Since(startTime).Milliseconds())
-}
-
-var ttsCreation *creation.TTS
-
-func (s *GracefulServer) creationAPIHandler(w http.ResponseWriter, r *http.Request) {
-	s.creationLock.Lock()
-	defer s.creationLock.Unlock()
-	defer r.Body.Close()
-	pass := s.verifyToken(w, r)
-	if !pass {
-		return
-	}
-
-	startTime := time.Now()
-	body, _ := io.ReadAll(r.Body)
-	text := string(body)
-	log.Infoln("接收到Json(Creation): ", text)
-
-	var reqData CreationJson
-	err := json.Unmarshal(body, &reqData)
-	if err != nil {
-		writeErrorData(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	if ttsCreation == nil {
-		ttsCreation = creation.New()
-	}
-
-	var succeed = make(chan []byte)
-	var failed = make(chan error)
-	go func() {
-		for i := 0; i < 3; i++ { /* 循环3次, 成功则return */
-			data, err := ttsCreation.GetAudioUseContext(r.Context(), reqData.Text, reqData.Format, reqData.VoiceProperty())
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return
-				}
-				if i == 2 { //三次请求都失败
-					failed <- err
-					return
-				}
-				log.Warnln(err)
-				log.Warnf("开始第%d次重试...", i+1)
-				time.Sleep(time.Second * 2)
-			} else { /* 成功 */
-				succeed <- data
-				return
-			}
-		}
-	}()
-
-	select { /* 阻塞 等待结果 */
-	case data := <-succeed: /* 成功接收到音频 */
-		log.Infof("音频下载完成, 大小：%dKB", len(data)/1024)
-		err := writeAudioData(w, data, reqData.Format)
-		if err != nil {
-			log.Warnln(err)
-		}
-	case reason := <-failed: /* 失败 */
-		writeErrorData(w, http.StatusInternalServerError, "获取音频失败(Creation): "+reason.Error())
-		ttsCreation = nil
-	case <-r.Context().Done(): /* 与阅读APP断开连接  超时15s */
-		log.Warnln("客户端(阅读APP)连接 超时关闭/意外断开")
-	}
-
-	log.Infof("耗时: %dms\n", time.Since(startTime).Milliseconds())
-}
-
 func returnJsonData(w http.ResponseWriter, r *http.Request, data edge.AudiaMetaData, audio_data []byte, format string) {
 	fileBase64 := base64.StdEncoding.EncodeToString(audio_data)
 	w.Header().Set("Content-Type", "application/json")
@@ -490,31 +323,4 @@ func (s *GracefulServer) legadoAPIHandler(w http.ResponseWriter, r *http.Request
 			log.Error("网络导入时写入失败：", err)
 		}
 	}
-}
-
-/* 发音人数据 */
-func (s *GracefulServer) creationVoicesAPIHandler(w http.ResponseWriter, _ *http.Request) {
-	token, err := creation.GetToken()
-	if err != nil {
-		writeErrorData(w, http.StatusInternalServerError, "获取Token失败: "+err.Error())
-		return
-	}
-	data, err := creation.GetVoices(token)
-	if err != nil {
-		writeErrorData(w, http.StatusInternalServerError, "获取Voices失败: "+err.Error())
-		return
-	}
-	w.Header().Set("cache-control", "public, max-age=3600, s-maxage=3600")
-	_, _ = w.Write(data)
-}
-
-func (s *GracefulServer) azureVoicesAPIHandler(w http.ResponseWriter, _ *http.Request) {
-	data, err := azure.GetVoices()
-	if err != nil {
-		writeErrorData(w, http.StatusInternalServerError, "获取Voices失败: "+err.Error())
-		return
-	}
-
-	w.Header().Set("cache-control", "public, max-age=3600, s-maxage=3600")
-	_, _ = w.Write(data)
 }
