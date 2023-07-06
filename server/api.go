@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -217,7 +218,7 @@ func (s *GracefulServer) edgeAPIHandler2(w http.ResponseWriter, r *http.Request)
 	}
 
 	var succeed2 = make(chan edge.AudiaMetaData)
-	var succeed = make(chan []byte)
+	var succeed1 = make(chan []byte)
 	var failed = make(chan error)
 	go func() {
 		for i := 0; i < 3; i++ { /* 循环3次, 成功则return */
@@ -232,19 +233,22 @@ func (s *GracefulServer) edgeAPIHandler2(w http.ResponseWriter, r *http.Request)
 				}
 			} else { /* 成功 */
 				succeed2 <- audio_meta_data
-				succeed <- data
+				succeed1 <- data
 				return
 			}
 		}
 	}()
 
+	audio_meta_data := <-succeed2
+
 	select { /* 阻塞 等待结果 */
-	case data := <-succeed: /* 成功接收到音频 */
+	case data := <-succeed1: /* 成功接收到音频 */
 		log.Infof("音频下载完成, 大小：%dKB", len(data)/1024)
-		err := returnJsonData(w, data)
-		if err != nil {
-			log.Warnln(err)
-		}
+		returnJsonData(w, r, audio_meta_data, data, format)
+		// err := writeAudioData(w, data, format)
+		// if err != nil {
+		// 	log.Warnln(err)
+		// }
 	case reason := <-failed: /* 失败 */
 		ttsEdge.CloseConn()
 		ttsEdge = nil
@@ -252,7 +256,7 @@ func (s *GracefulServer) edgeAPIHandler2(w http.ResponseWriter, r *http.Request)
 	case <-r.Context().Done(): /* 与阅读APP断开连接 超时15s */
 		log.Warnln("客户端(阅读APP)连接 超时关闭/意外断开")
 		select { /* 3s内如果成功下载, 就保留与微软服务器的连接 */
-		case <-succeed:
+		case <-succeed1:
 			log.Debugln("断开后3s内成功下载")
 		case <-time.After(time.Second * 3): /* 抛弃WebSocket连接 */
 			ttsEdge.CloseConn()
@@ -420,10 +424,16 @@ func (s *GracefulServer) creationAPIHandler(w http.ResponseWriter, r *http.Reque
 	log.Infof("耗时: %dms\n", time.Since(startTime).Milliseconds())
 }
 
-func returnJsonData(w http.ResponseWriter, data interface{}) error {
+func returnJsonData(w http.ResponseWriter, r *http.Request, data edge.AudiaMetaData, audio_data []byte, format string) {
+	fileBase64 := base64.StdEncoding.EncodeToString(audio_data)
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	return json.NewEncoder(w).Encode(data)
+	var m = map[string]string{
+		"data":   fileBase64,
+		"format": format,
+	}
+	data.AudioData = m
+	jsonData, _ := json.Marshal(data)
+	w.Write(jsonData)
 }
 
 /* 写入音频数据到客户端(阅读APP) */

@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
@@ -105,8 +106,8 @@ func (t *TTS) CloseConn() {
 }
 
 type AudiaMetaData struct {
-	AudioMeta string
-	AudioData string
+	AudioMeta []map[string]interface{}
+	AudioData map[string]string
 }
 
 func (t *TTS) GetAudioWithWordBoundary(ssml, format string) (data AudiaMetaData, audioData []byte, err error) {
@@ -144,8 +145,9 @@ func (t *TTS) GetAudioWithWordBoundary(ssml, format string) (data AudiaMetaData,
 			metaData += "]"
 			metaData = strings.ReplaceAll(metaData, "\r", "")
 			metaData = strings.ReplaceAll(metaData, "\n", "")
-			data.AudioMeta = metaData
-			// data.AudioData = string(audioData)
+			var json_data []map[string]interface{}
+			json.Unmarshal([]byte(metaData), &json_data)
+			data.AudioMeta = json_data
 			finished <- true
 			return false
 		}
