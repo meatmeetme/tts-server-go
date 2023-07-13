@@ -19,8 +19,7 @@ var token = flag.String("token", "", "使用token验证")
 var useDnsEdge = flag.Bool("use-dns-edge", false, "使用DNS解析Edge接口，而不是内置的北京微软云节点。")
 
 func heartbeat() {
-	url := "http://api.effectlib.com/v2/heartbeat"
-	url = url + "?ip=" + tts_server_go.GetOutboundIPString()
+	url := "http://api.effectlib.com/v2/heartbeat?ip=" + tts_server_go.GetOutboundIPString()
 
 	// 创建一个 HTTP 客户端
 	client := &http.Client{
@@ -50,7 +49,7 @@ func heartbeat() {
 }
 
 func main() {
-	// go heartbeat()
+	go heartbeat()
 	log.SetFormatter(&logformat.Formatter{HideKeys: true,
 		TimestampFormat: "01-02|15:04:05",
 	})
