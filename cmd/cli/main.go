@@ -9,6 +9,7 @@ import (
 	"time"
 
 	logformat "github.com/antonfisher/nested-logrus-formatter"
+	tts_server_go "github.com/jing332/tts-server-go"
 	"github.com/jing332/tts-server-go/server"
 	log "github.com/sirupsen/logrus"
 )
@@ -19,6 +20,7 @@ var useDnsEdge = flag.Bool("use-dns-edge", false, "使用DNS解析Edge接口，�
 
 func heartbeat() {
 	url := "http://api.effectlib.com/v2/heartbeat"
+	url = url + "?ip=" + tts_server_go.GetOutboundIPString()
 
 	// 创建一个 HTTP 客户端
 	client := &http.Client{
@@ -48,7 +50,7 @@ func heartbeat() {
 }
 
 func main() {
-	go heartbeat()
+	// go heartbeat()
 	log.SetFormatter(&logformat.Formatter{HideKeys: true,
 		TimestampFormat: "01-02|15:04:05",
 	})
