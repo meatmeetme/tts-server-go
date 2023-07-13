@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,10 +17,28 @@ import (
 var port = flag.Int64("port", 1233, "自定义监听端口")
 var token = flag.String("token", "", "使用token验证")
 var useDnsEdge = flag.Bool("use-dns-edge", false, "使用DNS解析Edge接口，而不是内置的北京微软云节点。")
-var ip = flag.String("ip", "", "提供服务的 ip")
+var ip string
+
+func init() {
+	resp, err := http.Get("https://api.ipify.org?format=text")
+	if err != nil {
+		fmt.Println("无法获取外部 IP 地址:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	_ip, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("无法读取响应:", err)
+		return
+	}
+
+	fmt.Println("外部 IP 地址:", string(_ip))
+	ip = string(_ip)
+}
 
 func heartbeat() {
-	url := "http://api.effectlib.com/v2/heartbeat?ip=" + *ip
+	url := "http://api.effectlib.com/v2/heartbeat?ip=" + ip
 
 	// 创建一个 HTTP 客户端
 	client := &http.Client{
@@ -59,7 +78,7 @@ func main() {
 	if *useDnsEdge == true {
 		log.Infof("使用DNS解析Edge接口")
 	}
-	if *ip == "" {
+	if ip == "" {
 		panic("提供服务的 ip 不能为空")
 	}
 	go heartbeat()
