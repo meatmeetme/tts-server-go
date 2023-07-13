@@ -9,7 +9,6 @@ import (
 	"time"
 
 	logformat "github.com/antonfisher/nested-logrus-formatter"
-	tts_server_go "github.com/jing332/tts-server-go"
 	"github.com/jing332/tts-server-go/server"
 	log "github.com/sirupsen/logrus"
 )
@@ -17,9 +16,10 @@ import (
 var port = flag.Int64("port", 1233, "自定义监听端口")
 var token = flag.String("token", "", "使用token验证")
 var useDnsEdge = flag.Bool("use-dns-edge", false, "使用DNS解析Edge接口，而不是内置的北京微软云节点。")
+var ip = flag.String("ip", "", "提供服务的 ip")
 
 func heartbeat() {
-	url := "http://api.effectlib.com/v2/heartbeat?ip=" + tts_server_go.GetOutboundIPString()
+	url := "http://api.effectlib.com/v2/heartbeat?ip=" + *ip
 
 	// 创建一个 HTTP 客户端
 	client := &http.Client{
@@ -49,7 +49,6 @@ func heartbeat() {
 }
 
 func main() {
-	go heartbeat()
 	log.SetFormatter(&logformat.Formatter{HideKeys: true,
 		TimestampFormat: "01-02|15:04:05",
 	})
@@ -60,6 +59,10 @@ func main() {
 	if *useDnsEdge == true {
 		log.Infof("使用DNS解析Edge接口")
 	}
+	if *ip == "" {
+		panic("提供服务的 ip 不能为空")
+	}
+	go heartbeat()
 
 	srv := &server.GracefulServer{Token: *token, UseDnsEdge: *useDnsEdge}
 	srv.HandleFunc()
