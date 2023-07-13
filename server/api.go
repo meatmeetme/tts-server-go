@@ -46,7 +46,6 @@ func (s *GracefulServer) HandleFunc() {
 	webFilesFs, _ := fs.Sub(webFiles, "public")
 	s.serveMux.Handle("/", http.FileServer(http.FS(webFilesFs)))
 	s.serveMux.Handle("/api/legado", http.TimeoutHandler(http.HandlerFunc(s.legadoAPIHandler), 15*time.Second, "timeout"))
-
 	s.serveMux.Handle("/api/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandler), 30*time.Second, "timeout"))
 	s.serveMux.Handle("/api/v2/ra", http.TimeoutHandler(http.HandlerFunc(s.edgeAPIHandlerWithJsonReturn), 30*time.Second, "timeout"))
 }
