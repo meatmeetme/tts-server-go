@@ -37,7 +37,7 @@ func heartbeat() {
 			} else {
 				fmt.Println("心跳正常")
 			}
-			defer resp.Body.Close()
+			resp.Body.Close()
 		}
 		// 处理心跳响应
 		// ...
