@@ -45,26 +45,21 @@ func heartbeat() {
 		Timeout: 5 * time.Second, // 设置超时时间
 	}
 
-	// 创建一个无限循环，定时发送心跳请求
-	for {
-		// 发送 GET 请求
-		if resp, err := client.Get(url); err != nil {
-			fmt.Println("心跳请求发送失败:", err)
+	// 发送 GET 请求
+	if resp, err := client.Get(url); err != nil {
+		fmt.Println("心跳请求发送失败:", err)
+	} else {
+		// 检查响应状态码
+		if resp.StatusCode != http.StatusOK {
+			fmt.Println("心跳请求返回非 200 状态码:", resp.StatusCode)
 		} else {
-			// 检查响应状态码
-			if resp.StatusCode != http.StatusOK {
-				fmt.Println("心跳请求返回非 200 状态码:", resp.StatusCode)
-			} else {
-				fmt.Println("心跳正常")
-			}
-			resp.Body.Close()
+			fmt.Println("心跳正常")
 		}
-		// 处理心跳响应
-		// ...
-
-		// 休眠一段时间后再次发送心跳请求
-		time.Sleep(10 * time.Second)
+		defer resp.Body.Close()
 	}
+
+	time.Sleep(10 * time.Second)
+	go heartbeat()
 }
 
 func main() {
